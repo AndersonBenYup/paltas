@@ -1,0 +1,94 @@
+# Frontend — plagas-palta-hass
+
+App web de diagnóstico de plagas y enfermedades en palta Hass.
+
+## Stack
+
+- React 19, Vite 5, TypeScript 5 (strict)
+- TanStack Query 5 (estado de servidor)
+- Zod (validación de formularios y respuestas)
+- openapi-fetch (cliente HTTP tipado desde el OpenAPI del backend)
+- oidc-client-ts (Auth Code + PKCE; token solo en memoria)
+- MSW 2 (mocks para tests)
+- Playwright (E2E)
+
+## Setup
+
+```bash
+npm install
+cp .env.example .env.development.local
+npm run dev
+```
+
+Por defecto, `npm run dev` arranca en `http://localhost:5173` y proxia `/api`
+hacia `http://localhost:8000` (backend en local).
+
+## Scripts
+
+| Script              | Qué hace                                                 |
+| ------------------- | -------------------------------------------------------- |
+| `npm run dev`       | Vite dev server con HMR                                  |
+| `npm run build`     | `tsc -b` + `vite build`                                  |
+| `npm run preview`   | Sirve el build localmente                                |
+| `npm run lint`      | ESLint (incluye `boundaries`)                            |
+| `npm run typecheck` | `tsc --noEmit`                                           |
+| `npm run test`      | Vitest en watch                                          |
+| `npm run test:run`  | Vitest una vez                                           |
+| `npm run test:cov`  | Con coverage                                             |
+| `npm run gen:api`   | Regenera `core/http/schema.d.ts` desde `../openapi.json` |
+| `npm run check:api` | Falla si el contrato cambió                              |
+| `npm run e2e`       | Playwright contra el dev server                          |
+
+## Diagnóstico en tiempo real
+
+La cámara detecta en vivo, sin tomar foto: el modelo YOLO corre **en el navegador**
+con `onnxruntime-web` (WebGPU si el dispositivo lo soporta, si no WASM).
+
+- Modelos: `public/modelos/{hojas,frutos}.onnx` + `modelos.json` (clases, imgsz).
+  Se regeneran desde `backend/models/*.pt` con:
+  ```bash
+  cd backend && uv run --with onnx --with onnxslim python ../ml/scripts/03_exportar_onnx.py
+  ```
+  Hay que volver a exportarlos cada vez que se promueve un `.pt` nuevo.
+- `features/diagnostico/realtime/detector.worker.ts`: la inferencia corre en un
+  **Web Worker** para no bloquear el video (letterbox y NMS en `yolo.ts`).
+  `detector-onnx.ts` solo captura el cuadro (`ImageBitmap`) y se lo pasa.
+- COOP/COEP (`vite.config.ts` y `vercel.json`) habilitan WASM multihilo en
+  dispositivos sin WebGPU. Mantener ambos archivos en sincronía.
+- `features/diagnostico/realtime/estabilizador.ts`: seguimiento entre cuadros,
+  suavizado de cajas y voto de clase para que el diagnóstico no parpadee.
+- **Guardar diagnóstico** envía el cuadro actual a `POST /api/v1/diagnosticos`:
+  el backend lo vuelve a analizar a 1024 px y lo guarda en la BD.
+
+## Estructura
+
+```
+src/
+├── main.tsx              # entry point
+├── app/                  # App.tsx, providers, router
+├── test/                 # setup + MSW
+├── core/                 # infraestructura transversal
+│   ├── config/           # env (window.__APP_CONFIG__ + Zod)
+│   ├── auth/             # OIDC + PKCE
+│   ├── http/             # openapi-fetch + ApiError
+│   └── logging/
+├── shared/               # UI, hooks, lib (sin reglas de negocio)
+│   ├── ui/               # Button, Card, Alert, FileDrop, Spinner
+│   ├── hooks/
+│   └── lib/
+└── features/             # Screaming Architecture
+    ├── diagnostico/      # captura + diagnóstico
+    ├── historial/        # lista paginada de diagnósticos
+    └── catalogo/         # enfermedades y recomendaciones
+```
+
+## Boundaries (eslint-plugin-boundaries)
+
+| Desde        | Puede importar                              |
+| ------------ | ------------------------------------------- |
+| `app`        | `features`, `shared`, `core`                |
+| `features/X` | `shared`, `core`, `features/X` (a sí misma) |
+| `shared`     | solo `shared`                               |
+| `core`       | solo `core`                                 |
+
+Las features solo exponen su `index.ts` al resto de la app.
